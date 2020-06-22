@@ -48,11 +48,11 @@ import tvm.relay.testing.darknet
 
 ######################################################################
 # Choose the model
-# -----------------------
-# Models are: 'yolov2', 'yolov3' or 'yolov3-tiny'
+# ----------------
+# Models are: 'yolov3', 'yolov3-tiny' or 'yolov4'
 
 # Model name
-MODEL_NAME = 'yolov3'
+MODEL_NAME = 'yolov4'
 
 ######################################################################
 # Download required files
@@ -60,18 +60,24 @@ MODEL_NAME = 'yolov3'
 # Download cfg and weights file if first time.
 CFG_NAME = MODEL_NAME + '.cfg'
 WEIGHTS_NAME = MODEL_NAME + '.weights'
-REPO_URL = 'https://github.com/dmlc/web-data/blob/master/darknet/'
-CFG_URL = REPO_URL + 'cfg/' + CFG_NAME + '?raw=true'
-WEIGHTS_URL = 'https://pjreddie.com/media/files/' + WEIGHTS_NAME
+
+if MODEL_NAME == 'yolov4':
+    REPO_URL = 'https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v3_optimal/'
+    CFG_URL = REPO_URL + CFG_NAME
+    WEIGHTS_URL = REPO_URL + WEIGHTS_NAME
+else:
+    REPO_URL = 'https://github.com/dmlc/web-data/blob/master/darknet/'
+    CFG_URL = REPO_URL + 'cfg/' + CFG_NAME + '?raw=true'
+    WEIGHTS_URL = 'https://pjreddie.com/media/files/' + WEIGHTS_NAME
 
 cfg_path = download_testdata(CFG_URL, CFG_NAME, module="darknet")
 weights_path = download_testdata(WEIGHTS_URL, WEIGHTS_NAME, module="darknet")
 
 # Download and Load darknet library
 if sys.platform in ['linux', 'linux2']:
-    DARKNET_LIB = 'libdarknet2.0.so'
+    DARKNET_LIB = 'libdarknet3.0.so'
     DARKNET_URL = REPO_URL + 'lib/' + DARKNET_LIB + '?raw=true'
-elif sys.platform == 'darwin':
+elif sys.platform == 'darwin': # Only supports yolov2 and yolov3
     DARKNET_LIB = 'libdarknet_mac2.0.so'
     DARKNET_URL = REPO_URL + 'lib_osx/' + DARKNET_LIB + '?raw=true'
 else:
@@ -81,14 +87,17 @@ else:
 lib_path = download_testdata(DARKNET_URL, DARKNET_LIB, module="darknet")
 
 DARKNET_LIB = __darknetffi__.dlopen(lib_path)
-net = DARKNET_LIB.load_network(cfg_path.encode('utf-8'), weights_path.encode('utf-8'), 0)
+import pickle
+
+net = DARKNET_LIB.load_network_custom(cfg_path.encode('utf-8'), weights_path.encode('utf-8'), 0, 1)
+
 dtype = 'float32'
 batch_size = 1
 
-data = np.empty([batch_size, net.c, net.h, net.w], dtype)
-shape_dict = {'data': data.shape}
+dshape = (batch_size, net.c, net.h, net.w)
+shape_dict = {'data': dshape}
 print("Converting darknet to relay functions...")
-mod, params = relay.frontend.from_darknet(net, dtype=dtype, shape=data.shape)
+mod, params = relay.frontend.from_darknet(net, dtype=dtype, shape=dshape)
 
 ######################################################################
 # Import the graph to Relay
@@ -98,7 +107,7 @@ target = 'llvm'
 target_host = 'llvm'
 ctx = tvm.cpu(0)
 data = np.empty([batch_size, net.c, net.h, net.w], dtype)
-shape = {'data': data.shape}
+shape = {'data': dshape}
 print("Compiling the model...")
 with tvm.transform.PassContext(opt_level=3):
     graph, lib, params = relay.build(mod,
@@ -106,7 +115,7 @@ with tvm.transform.PassContext(opt_level=3):
                                      target_host=target_host,
                                      params=params)
 
-[neth, netw] = shape['data'][2:] # Current image shape is 608x608
+[neth, netw] = dshape[2:] # Current image shape is 608x608
 ######################################################################
 # Load a test image
 # -----------------
@@ -180,6 +189,20 @@ elif MODEL_NAME == 'yolov3-tiny':
         layer_out['classes'] = layer_attr[4]
         tvm_out.append(layer_out)
         thresh = 0.560
+
+elif MODEL_NAME == 'yolov4':
+    for i in range(3):
+        layer_out = {}
+        layer_out['type'] = 'Yolo'
+        # Get the yolo layer attributes (n, out_c, out_h, out_w, classes, total)
+        layer_attr = m.get_output(i*4+3).asnumpy()
+        layer_out['biases'] = m.get_output(i*4+2).asnumpy()
+        layer_out['mask'] = m.get_output(i*4+1).asnumpy()
+        out_shape = (layer_attr[0], layer_attr[1]//layer_attr[0],
+                     layer_attr[2], layer_attr[3])
+        layer_out['output'] = m.get_output(i*4).asnumpy().reshape(out_shape)
+        layer_out['classes'] = layer_attr[4]
+        tvm_out.append(layer_out)
 
 # do the detection and bring up the bounding boxes
 img = tvm.relay.testing.darknet.load_image_color(img_path)

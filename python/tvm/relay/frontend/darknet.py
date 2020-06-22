@@ -54,14 +54,14 @@ def _darknet_maxpooling(inputs, params, attrs, prefix):
     """Process the max pool 2d operation."""
     new_attrs = {}
     kernel = attrs.get('kernel')
-    strides = attrs.get('stride', 1)
+    strides = attrs.get('stride', (1, 1))
     pads = attrs.get('pad', 1)
     new_attrs['pool_size'] = (kernel, kernel)
-    new_attrs['strides'] = (strides, strides)
+    new_attrs['strides'] = (strides[0], strides[1])
     new_attrs['padding'] = (pads, pads)
     extra_pad_size = attrs.get('extra_pad_size', 0)
     if extra_pad_size:
-        pad_width = ((0, 0), (0, 0), (0, extra_pad_size), (0, extra_pad_size))
+        pad_width = ((0, 0), (0, 0), (0, extra_pad_size[0]), (0, extra_pad_size[1]))
         inputs = [get_relay_op('pad')(*inputs,
                                       pad_width=pad_width,
                                       pad_value=np.finfo(np.float32).min)]
@@ -226,7 +226,7 @@ def _darknet_softmax_output(inputs, params, attrs, prefix):
 def _darknet_route(inputs, params, attrs, prefix):
     """Process the route operation, which is equivalent to concat."""
     new_attrs = {'axis': attrs.get('dim', 1)}
-    return get_relay_op('concatenate')((inputs[0], inputs[1]), **new_attrs)
+    return get_relay_op('concatenate')(inputs, **new_attrs)
 
 def _darknet_reorg(inputs, params, attrs, prefix):
     """Process the reorg operation."""
@@ -260,12 +260,16 @@ def _darknet_yolo(inputs, params, attrs, prefix):
     num = attrs.get('n', 1)
     classes = attrs.get('classes', 1)
     input_shape = attrs.get('shape')
+    scale_x_y = _expr.const(attrs.get('scale_x_y', 0.0))
+    alpha = scale_x_y
+    beta = _expr.const(-0.5) * (scale_x_y - _expr.const(1.0))
     split_size = classes + 5
     intermediate_shape = (input_shape[0], num, split_size, input_shape[2], input_shape[3])
     data_block = get_relay_op('reshape')(inputs[0], newshape=intermediate_shape)
     split_indices = (2, 4)
     split_res = get_relay_op('split')(data_block, indices_or_sections=split_indices, axis=2)
     split_res0 = get_relay_op('sigmoid')(split_res[0])
+    split_res0 = split_res0 * alpha + beta
     split_res2 = get_relay_op('sigmoid')(split_res[2])
     out = get_relay_op('concatenate')((split_res0, split_res[1], split_res2), axis=2)
     return get_relay_op('reshape')(out, newshape=input_shape)
@@ -274,17 +278,25 @@ class ACTIVATION(object):
     """Darknet ACTIVATION Class constant."""
     LOGISTIC = 0
     RELU = 1
-    RELIE = 2
-    LINEAR = 3
-    RAMP = 4
-    TANH = 5
-    PLSE = 6
-    LEAKY = 7
-    ELU = 8
-    LOGGY = 9
-    STAIR = 10
-    HARDTAN = 11
-    LHTAN = 12
+    RELU6 = 2
+    RELIE = 3
+    LINEAR = 4
+    RAMP = 5
+    TANH = 6
+    PLSE = 7
+    LEAKY = 8
+    ELU = 9
+    LOGGY = 10
+    STAIR = 11
+    HARDTAN = 12
+    LHTAN = 13
+    SELU = 14
+    GELU = 15
+    SWISH = 16
+    MISH = 17
+    NORM_CHAN = 18
+    NORM_CHAN_SOFTMAX = 19
+    NORM_CHAN_SOFTMAX_MAXVAL = 20
 
 def _darknet_activations(inputs, params, attrs):
     """Process the activation function."""
@@ -315,6 +327,12 @@ def _darknet_activations(inputs, params, attrs):
         new_attrs['alpha'] = slope
         return get_relay_op('leaky_relu')(data, **new_attrs)
 
+    def _mish(data):
+        def _softplus(x):
+            return get_relay_op("log")(get_relay_op("exp")(x) + _const(1.))
+
+        return data * get_relay_op("tanh")(_softplus(data))
+
     if ACTIVATION.LOGISTIC == act:
         data = _sigmoid(data)
     elif ACTIVATION.RELU == act:
@@ -327,8 +345,10 @@ def _darknet_activations(inputs, params, attrs):
         data = _leaky_relu(data, attrs.get('slope', 0.1))
     elif ACTIVATION.ELU == act:
         data = _elu(data)
+    elif ACTIVATION.MISH == act:
+        data = _mish(data)
     else:
-        _darknet_not_support('act: ' + attrs)
+        _darknet_not_support('act: ' + act)
     return data
 
 class LAYERTYPE(Enum):
@@ -337,31 +357,40 @@ class LAYERTYPE(Enum):
     DECONVOLUTIONAL = 1
     CONNECTED = 2
     MAXPOOL = 3
-    SOFTMAX = 4
-    DETECTION = 5
-    DROPOUT = 6
-    CROP = 7
-    ROUTE = 8
-    COST = 9
-    NORMALIZATION = 10
-    AVGPOOL = 11
-    LOCAL = 12
-    SHORTCUT = 13
-    ACTIVE = 14
-    RNN = 15
-    GRU = 16
-    LSTM = 17
-    CRNN = 18
-    BATCHNORM = 19
-    NETWORK = 20
-    XNOR = 21
-    REGION = 22
-    YOLO = 23
-    REORG = 24
-    UPSAMPLE = 25
-    LOGXENT = 26
-    L2NORM = 27
-    BLANK = 28
+    LOCAL_AVGPOOL = 4
+    SOFTMAX = 5
+    DETECTION = 6
+    DROPOUT = 7
+    CROP = 8
+    ROUTE = 9
+    COST = 10
+    NORMALIZATION = 11
+    AVGPOOL = 12
+    LOCAL = 13
+    SHORTCUT = 14
+    SCALE_CHANNELS = 15
+    SAM = 16
+    ACTIVE = 17
+    RNN = 18
+    GRU = 19
+    LSTM = 20
+    CONV_LSTM = 21
+    CRNN = 22
+    BATCHNORM = 23
+    NETWORK = 24
+    XNOR = 25
+    REGION = 26
+    YOLO = 27
+    GAUSSIAN_YOLO = 28
+    ISEG = 29
+    REORG = 30
+    REORG_OLD = 31
+    UPSAMPLE = 32
+    LOGXENT = 33
+    L2NORM = 34
+    EMPTY = 35
+    BLANK = 36
+
 
 _DARKNET_CONVERT_MAP = {
     LAYERTYPE.CONVOLUTIONAL   : _darknet_conv2d,
@@ -372,7 +401,8 @@ _DARKNET_CONVERT_MAP = {
     LAYERTYPE.AVGPOOL         : _darknet_avgpooling,
     LAYERTYPE.ROUTE           : _darknet_route,
     LAYERTYPE.REORG           : _darknet_reorg,
-    LAYERTYPE.REGION          : _darknet_region,
+    LAYERTYPE.REORG_OLD       : _darknet_reorg,
+    LAYERTYPE.REGION          : _darknet_not_support,
     LAYERTYPE.SHORTCUT        : _darknet_shortcut,
     LAYERTYPE.UPSAMPLE        : _darknet_upsampling,
     LAYERTYPE.L2NORM          : _darknet_l2normalize,
@@ -587,13 +617,20 @@ class GraphProto(object):
                 attr.update({'use_bias' : False})
 
         elif LAYERTYPE.MAXPOOL == layer_type:
-            attr.update({'pad' : layer.pad})
-            attr.update({'stride' : layer.stride})
+            pad = int(layer.pad / 2)
+            attr.update({'pad' : pad})
+            attr.update({'stride' : (layer.stride_y, layer.stride_x)})
             attr.update({'kernel' : layer.size})
-            max_output = (layer.w - layer.size + 2 * layer.pad)/float(layer.stride) + 1
-            if max_output < layer.out_w:
-                extra_pad = (layer.out_w - max_output)*layer.stride
-                attr.update({'extra_pad_size' : int(extra_pad)})
+            max_output_h = (layer.h - layer.size + 2 * pad)/float(layer.stride_y) + 1
+            max_output_w = (layer.w - layer.size + 2 * pad)/float(layer.stride_x) + 1
+            extra_pad_w = extra_pad_h = 0
+
+            if max_output_h < layer.out_h:
+                extra_pad_h = (layer.out_h - max_output_h)*layer.stride_y
+            if max_output_w < layer.out_w:
+                extra_pad_w = (layer.out_w - max_output_w)*layer.stride_x
+            if extra_pad_w or extra_pad_h:
+                attr.update({'extra_pad_size' : (extra_pad_h, extra_pad_w)})
         elif LAYERTYPE.AVGPOOL == layer_type:
             attr.update({'pad' : layer.pad})
             if layer.stride == 0:
@@ -631,6 +668,9 @@ class GraphProto(object):
         elif LAYERTYPE.REORG == layer_type:
             attr.update({'stride' : layer.stride})
 
+        elif LAYERTYPE.REORG_OLD == layer_type:
+            attr.update({'stride' : layer.stride})
+
         elif LAYERTYPE.REGION == layer_type:
             attr.update({'n' : layer.n})
             attr.update({'classes' : layer.classes})
@@ -643,6 +683,7 @@ class GraphProto(object):
             attr.update({'n' : layer.n})
             attr.update({'classes' : layer.classes})
             attr.update({'shape' : (-1, layer.c, layer.h, layer.w)})
+            attr.update({'scale_x_y' : layer.scale_x_y})
 
         elif LAYERTYPE.UPSAMPLE == layer_type:
             attr.update({'scale' : layer.stride})
